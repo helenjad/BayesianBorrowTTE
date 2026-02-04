@@ -1,0 +1,882 @@
+---
+title: "example"
+author: "Yuxi Zhao"
+date: "2025-01-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+#### library
+```{r}
+library("tidyverse")
+library("survival")
+# library("runjags")
+library("coda")
+library(rstan)
+library(tidyverse)
+# library("loo")
+
+options(buildtools.check = function(action) TRUE)
+```
+
+#### function
+
+```{r}
+
+#------------------------------------------------------------------------------------------------------------#
+# Stan model- No Borrowing
+#------------------------------------------------------------------------------------------------------------#
+
+# Define Stan Model Code for Piecewise Constant Hazard Model
+stan.no.borrow <- "
+data {
+  int<lower=1> n_ti;                  // Total subject-intervals
+  int<lower=1> num_intervals;          // Number of hazard intervals
+  int<lower=1, upper=num_intervals> interval_idx[n_ti];  // Index of interval for each subject
+  vector[n_ti] interval_length;        // Length of each interval
+  int<lower=0> status[n_ti];           // Event count (0 or 1, Poisson-trick)
+  vector[n_ti] treat1;                  // Treatment indicator (0 or 1)
+  vector[n_ti] treat2;                  // Treatment indicator (0 or 1)
+}
+
+parameters {
+  vector<lower=0>[num_intervals] lambda; // Hazard rates for each interval
+  real beta1;                             // Treatment effect (log hazard ratio)
+  real beta2;   
+}
+
+model {
+  // Priors
+  lambda ~ gamma(0.0001, 0.0001);          // Prior for hazard rates
+  beta1 ~ normal(0, 5);
+  beta2 ~ normal(0, 5);
+  
+  // Likelihood: Poisson trick for piecewise constant hazard model
+  status ~ poisson(interval_length .* lambda[interval_idx] .* exp(beta1 * treat1 + beta2 * treat2));
+
+}
+
+generated quantities {
+  
+  vector[n_ti] log_lik;
+ 
+  for (nn in 1:n_ti){
+    log_lik[nn] = poisson_lpmf( status[nn] | exp(log(lambda[interval_idx[nn]]) + log(interval_length[nn]) + treat1[nn]*beta1 + treat2[nn]*beta2));
+  }
+  
+}
+"
+
+#------------------------------------------------------------------------------------------------------------#
+# Stan model- NPP Unbound
+#------------------------------------------------------------------------------------------------------------#
+stan.npp.unb <- "
+data {
+  int<lower=1> n_ti;                  // Total subject-intervals
+  int<lower=1> num_intervals;          // Number of hazard intervals
+  int<lower=1, upper=num_intervals> interval_idx[n_ti];  // Index of interval for each subject
+  vector[n_ti] interval_length;        // Length of each interval
+  int<lower=0> status[n_ti];           // Event count (0 or 1, Poisson-trick)
+  vector[n_ti] treat1;                  // Treatment indicator (0 or 1)
+  vector[n_ti] treat2;                  // Treatment indicator (0 or 1)
+
+  int<lower=0> D1;                  // Total event in each interval
+  int<lower=0> D2;                  // Total event in each interval
+  int<lower=0> D3;                  // Total event in each interval
+ 
+  real<lower=0> T1;             // Total interval length within each interval
+  real<lower=0> T2;             // Total interval length within each interval
+  real<lower=0> T3;             // Total interval length within each interval
+}
+
+parameters {
+  vector<lower=0>[num_intervals] lambda; // Hazard rates for each interval
+  real beta1;                             // Treatment effect (log hazard ratio)
+  real beta2; 
+  real<lower=0, upper=1> alpha;          // Power prior parameter (degree of borrowing)
+
+}
+
+model {
+  // Priors
+  
+    alpha ~ beta(1, 1);
+    lambda[1] ~ gamma(alpha * D1 , alpha * T1 );  // Prior for hazard rates
+    lambda[2] ~ gamma(alpha * D2 ,  alpha * T2 );
+    lambda[3] ~ gamma(alpha * D3 , alpha * T3 );
+   
+  beta1 ~ normal(0, 5);                  // Treatment effect (log hazard ratio)
+  beta2 ~ normal(0, 5);
+
+  // Likelihood: Poisson trick for piecewise constant hazard model
+  status ~ poisson(interval_length .* lambda[interval_idx] .* exp(beta1 * treat1 + beta2 * treat2));
+ 
+}
+
+generated quantities {
+  
+  vector[n_ti] log_lik;
+ 
+  for (nn in 1:n_ti){
+    log_lik[nn] = poisson_lpmf( status[nn] | exp(log(lambda[interval_idx[nn]]) + log(interval_length[nn]) + treat1[nn]*beta1 + treat2[nn]*beta2));
+  }
+  
+}
+"
+
+
+#------------------------------------------------------------------------------------------------------------#
+# Stan model- NPP bounded beta
+#------------------------------------------------------------------------------------------------------------#
+stan.npp.bb <- "
+data {
+  int<lower=1> n_ti;                  // Total subject-intervals
+  int<lower=1> num_intervals;          // Number of hazard intervals
+  int<lower=1, upper=num_intervals> interval_idx[n_ti];  // Index of interval for each subject
+  vector[n_ti] interval_length;        // Length of each interval
+  int<lower=0> status[n_ti];           // Event count (0 or 1, Poisson-trick)
+  vector[n_ti] treat1;                  // Treatment indicator (0 or 1)
+  vector[n_ti] treat2;                  // Treatment indicator (0 or 1)
+
+  int<lower=0> D1;                  // Total event in each interval
+  int<lower=0> D2;                  // Total event in each interval
+  int<lower=0> D3;                  // Total event in each interval
+ 
+  real<lower=0> T1;             // Total interval length within each interval
+  real<lower=0> T2;             // Total interval length within each interval
+  real<lower=0> T3;             // Total interval length within each interval
+
+}
+
+parameters {
+  vector<lower=0>[num_intervals] lambda; // Hazard rates for each interval
+  real beta1;                             // Treatment effect (log hazard ratio)
+  real beta2;   
+  real<lower=0.05, upper=0.8> alpha;  // Bounded Power Prior parameter
+
+
+}
+
+model {
+  // Priors
+  
+    alpha ~ beta(1, 1)T[0.05, 0.8];
+    lambda[1] ~ gamma(alpha * D1 , alpha * T1 );  // Prior for hazard rates
+    lambda[2] ~ gamma(alpha * D2 ,  alpha * T2 );
+    lambda[3] ~ gamma(alpha * D3 , alpha * T3 );
+
+  beta1 ~ normal(0, 5);
+  beta2 ~ normal(0, 5);
+
+  // Likelihood: Poisson trick for piecewise constant hazard model
+  status ~ poisson(interval_length .* lambda[interval_idx] .* exp(beta1 * treat1 + beta2 * treat2));
+ 
+}
+
+generated quantities {
+  
+  vector[n_ti] log_lik;
+ 
+  for (nn in 1:n_ti){
+    log_lik[nn] = poisson_lpmf( status[nn] | exp(log(lambda[interval_idx[nn]]) + log(interval_length[nn]) + treat1[nn]*beta1 + treat2[nn]*beta2));
+  }
+  
+}
+"
+
+#------------------------------------------------------------------------------------------------------------#
+# Stan model- NPP bounded weight
+#------------------------------------------------------------------------------------------------------------#
+stan.npp.bw <- "
+data {
+  int<lower=1> n_ti;                  // Total subject-intervals
+  int<lower=1> num_intervals;          // Number of hazard intervals
+  int<lower=1, upper=num_intervals> interval_idx[n_ti];  // Index of interval for each subject
+  vector[n_ti] interval_length;        // Length of each interval
+  int<lower=0> status[n_ti];           // Event count (0 or 1, Poisson-trick)
+  vector[n_ti] treat1;                  // Treatment indicator (0 or 1)
+  vector[n_ti] treat2;                  // Treatment indicator (0 or 1)
+
+  int<lower=0> D1;                  // Total event in each interval
+  int<lower=0> D2;                  // Total event in each interval
+  int<lower=0> D3;                  // Total event in each interval
+  real<lower=0> T1;             // Total interval length within each interval
+  real<lower=0> T2;             // Total interval length within each interval
+  real<lower=0> T3;             // Total interval length within each interval
+
+  real mean_r;               // dissimilarity measurement
+  real<lower=0> prec_r; 
+  
+
+  real<lower=0> a;        // Upper bound
+  real<lower=0> b;        // Lower bound
+  real<lower=0> c_low;    // Lower threshold
+  real<lower=0> c_up;     // Upper threshold
+  
+}
+
+parameters {
+  vector<lower=0>[num_intervals] lambda; // Hazard rates for each interval
+  real beta1;                             // Treatment effect (log hazard ratio)
+  real beta2;   
+  real r;
+
+}
+
+
+transformed parameters {
+  real alpha;
+  
+  if (fabs(r) < c_low) {
+    alpha = b;
+  } else if (fabs(r) > c_up) {
+    alpha = a;
+  } else {
+    alpha = a + (b - a) * pow(1 - pow((fabs(r) - c_low) / (c_up - c_low), 2), 2);
+  }
+}
+
+model {
+  // Priors
+  
+    r ~ normal(mean_r, sqrt(1/prec_r)); // log hazard ratio
+  
+    lambda[1] ~ gamma(alpha * D1 , alpha * T1 );  // Prior for hazard rates
+    lambda[2] ~ gamma(alpha * D2 ,  alpha * T2 );
+    lambda[3] ~ gamma(alpha * D3 , alpha * T3 );
+
+  beta1 ~ normal(0, 5);
+  beta2 ~ normal(0, 5);
+
+  // Likelihood: Poisson trick for piecewise constant hazard model
+  status ~ poisson(interval_length .* lambda[interval_idx] .* exp(beta1 * treat1 + beta2 * treat2));
+ 
+}
+
+generated quantities {
+  
+  vector[n_ti] log_lik;
+ 
+  for (nn in 1:n_ti){
+    log_lik[nn] = poisson_lpmf( status[nn] | exp(log(lambda[interval_idx[nn]]) + log(interval_length[nn]) + treat1[nn]*beta1 + treat2[nn]*beta2));
+  }
+  
+}
+"
+
+#------------------------------------------------------------------------------------------------------------#
+# CPP - Uniform
+#------------------------------------------------------------------------------------------------------------#
+
+stan.cpp.unb <- "
+data {
+  int<lower=1> n_ti;                  // Total subject-intervals
+  int<lower=1> num_intervals;          // Number of hazard intervals
+  int<lower=1, upper=num_intervals> interval_idx[n_ti];  // Index of interval for each subject
+  vector[n_ti] interval_length;        // Length of each interval
+  int<lower=0> status[n_ti];           // Event count (0 or 1, Poisson-trick)
+  vector[n_ti] treat1;                  // Treatment indicator (0 or 1)
+  vector[n_ti] treat2;                  // Treatment indicator (0 or 1)
+
+  int<lower=0> D1;                  // Total event in each interval
+  int<lower=0> D2;                  // Total event in each interval
+  int<lower=0> D3;                  // Total event in each interval
+  real<lower=0> T1;             // Total interval length within each interval
+  real<lower=0> T2;             // Total interval length within each interval
+  real<lower=0> T3;             // Total interval length within each interval
+  
+}
+
+
+parameters {
+  vector[num_intervals] log_lambda_raw;   // Non-centered parameterization
+  vector<lower=0>[num_intervals] lambda_ref;  // Reference hazard rates
+  real<lower=0, upper=1> alpha;       // Power prior weight
+  real<lower=0> tau_log_lambda;       // Precision parameter for log_lambda
+  real beta1;                             // Treatment effect (log hazard ratio)
+  real beta2;   
+}
+
+transformed parameters {
+  vector[num_intervals] log_lambda;
+  log_lambda = log(lambda_ref) + log_lambda_raw * tau_log_lambda;
+}
+
+model {
+
+  // Likelihood
+ status ~ poisson(interval_length .* exp(log_lambda[interval_idx] + beta1 * treat1 + beta2 * treat2));
+
+  // Priors
+  log_lambda_raw ~ normal(0, 1);
+  lambda_ref[1] ~ gamma(alpha * D1 , alpha * T1 );
+  lambda_ref[2] ~ gamma(alpha * D2 , alpha * T2 );
+  lambda_ref[3] ~ gamma(alpha * D3 , alpha * T3  );
+
+  alpha ~ beta(fmax(log(tau_log_lambda), 1), 1);
+  tau_log_lambda ~ cauchy(0, 2) T[0, ];
+
+  beta1 ~ normal(0, 5);
+  beta2 ~ normal(0, 5);
+}
+
+generated quantities {
+  
+  vector[n_ti] log_lik;
+ 
+  for (nn in 1:n_ti){
+    log_lik[nn] = poisson_lpmf( status[nn] | exp(log_lambda[interval_idx[nn]] + log(interval_length[nn]) + treat1[nn]*beta1 + treat2[nn]*beta2));
+  }
+  
+}
+"
+
+
+
+#------------------------------------------------------------------------------------------------------------#
+# CPP - bounded beta
+#------------------------------------------------------------------------------------------------------------#
+
+stan.cpp.bb <- "
+data {
+  int<lower=1> n_ti;                  // Total subject-intervals
+  int<lower=1> num_intervals;          // Number of hazard intervals
+  int<lower=1, upper=num_intervals> interval_idx[n_ti];  // Index of interval for each subject
+  vector[n_ti] interval_length;        // Length of each interval
+  int<lower=0> status[n_ti];           // Event count (0 or 1, Poisson-trick)
+  vector[n_ti] treat1;                  // Treatment indicator (0 or 1)
+  vector[n_ti] treat2;                  // Treatment indicator (0 or 1)
+
+  int<lower=0> D1;                  // Total event in each interval
+  int<lower=0> D2;                  // Total event in each interval
+  int<lower=0> D3;                  // Total event in each interval
+  real<lower=0> T1;             // Total interval length within each interval
+  real<lower=0> T2;             // Total interval length within each interval
+  real<lower=0> T3;             // Total interval length within each interval
+ }
+
+parameters {
+  vector[num_intervals] log_lambda_raw;   // Non-centered parameterization
+  vector<lower=0>[num_intervals] lambda_ref;  // Reference hazard rates
+  real<lower=0.05, upper=0.8> alpha;       // Power prior weight
+  real<lower=0> tau_log_lambda;       // Precision parameter for log_lambda
+  real beta1;                             // Treatment effect (log hazard ratio)
+  real beta2;
+}
+
+transformed parameters {
+  vector[num_intervals] log_lambda;
+  log_lambda = log(lambda_ref) + log_lambda_raw * tau_log_lambda;
+}
+
+model {
+  // Likelihood
+  status ~ poisson(interval_length .* exp(log_lambda[interval_idx] + beta1 * treat1 + beta2 * treat2));
+
+  // Priors
+  log_lambda_raw ~ normal(0, 1);
+  lambda_ref[1] ~ gamma(alpha * D1 , alpha * T1 );
+  lambda_ref[2] ~ gamma(alpha * D2 , alpha * T2 );
+  lambda_ref[3] ~ gamma(alpha * D3 , alpha * T3 );
+
+  alpha ~ beta(fmax(log(tau_log_lambda), 1), 1)T[0.05, 0.8];
+  tau_log_lambda ~ cauchy(0, 2) T[0, ];
+
+  beta1 ~ normal(0, 5);
+  beta2 ~ normal(0, 5);
+}
+
+generated quantities {
+  
+  vector[n_ti] log_lik;
+ 
+  for (nn in 1:n_ti){
+    log_lik[nn] = poisson_lpmf( status[nn] | exp(log_lambda[interval_idx[nn]] + log(interval_length[nn]) + treat1[nn]*beta1 + treat2[nn]*beta2));
+  }
+  
+}
+"
+
+
+```
+
+#### load data
+
+
+```{r}
+load(file = "data final/CALIMA_data.RData")
+load(file = "data final/SIROCCO_data.RData")
+
+ref <- sirocco %>% filter(treatment == "Placebo") %>% mutate(id = 1:n())
+cur <- calima %>% mutate(id=1:n()) 
+
+intervals <- round(quantile(c(cur$time[cur$status==1]),c(0.5,0.8)))
+# 50% 80% 
+# 112 234 
+# 16, 32 weeks
+
+ref_long <- survival::survSplit(formula = Surv(time, status)~., data=ref, cut=intervals) %>% mutate(interval=factor(tstart), interval_length=time-tstart) 
+cur_long <- survival::survSplit(formula = Surv(time, status)~., data=cur, cut=intervals) %>% mutate(interval=factor(tstart), interval_length=time-tstart) 
+
+# current trial: add index for interval
+cur_long$Index_Interval_1 <- as.numeric(cur_long$interval==0)
+cur_long$Index_Interval_2 <- as.numeric(cur_long$interval==intervals[1])
+cur_long$Index_Interval_3 <- as.numeric(cur_long$interval==intervals[2])
+
+ cur_long <- cur_long %>%
+    mutate(interval_idx = recode(interval, `0` = 1, `112` = 2, `234` = 3)) %>%
+    mutate(treat1 = as.numeric(cur_long$treatment=="Benra 30mg Q4W"),
+           treat2 = as.numeric(cur_long$treatment=="Benra 30mg Q8W"))
+
+# provide Dsum and Tsum for model 
+ref_long_sum <- ref_long %>% group_by(interval) %>% summarize(Dsum = sum(status), Tsum=sum(interval_length))
+
+
+  
+ 
+```
+
+
+
+
+
+#### No borrow
+
+```{r}
+#---------------------------------------------------------------------
+# Prepare data for NPP no borrowing/ unbounded/ bounded beta
+data_list <- list(
+    n_ti =  nrow(cur_long),
+    num_intervals = length(intervals)+1,
+    interval_idx = cur_long$interval_idx,
+    interval_length = cur_long$interval_length,
+    status = cur_long$status,
+    treat1 = cur_long$treat1, 
+    treat2 = cur_long$treat2 
+  )
+
+# Fit the model using rstan
+  fit.no.borrow <- stan(
+    model_code = stan.no.borrow,
+    data = data_list,
+    iter = 10000,  # Increase iterations for better convergence
+    warmup = 1000,
+    chains = 2,
+    seed = 123,
+    control = list(adapt_delta = 0.95, max_treedepth = 15),  # Default is 0.8, increase to 0.95 or even 0.99
+    verbose = TRUE ,     # Show detailed error messages
+    init = "random" 
+)
+  
+# save(fit.no.borrow,file="example_fit_noborrow.RData")
+
+load("example_fit_noborrow.RData")  
+  
+summary_stats.noborrow <- summary(fit.no.borrow)$summary
+summary_stats.noborrow[1:5,] 
+#                   mean      se_mean           sd         2.5%          25%          50%          75%        97.5%     n_eff      Rhat
+# lambda[1]  0.002496219 3.187009e-06 0.0002705895  0.001995001  0.002308034  0.002486570  0.002674938  0.003050086  7208.672 1.0001553
+# lambda[2]  0.001797576 2.519400e-06 0.0002280371  0.001391489  0.001636518  0.001785685  0.001944593  0.002276044  8192.507 1.0000668
+# lambda[3]  0.001416059 2.044962e-06 0.0002105360  0.001034185  0.001270849  0.001404330  0.001550465  0.001858269 10599.424 1.0000584
+# beta1     -0.478722563 1.708674e-03 0.1450172388 -0.766815508 -0.576426316 -0.477164186 -0.381048316 -0.196941920  7203.119 0.9999942
+# beta2     -0.305740444 1.683418e-03 0.1394063407 -0.583099677 -0.399413279 -0.304573333 -0.210744262 -0.034833423  6857.746 1.0003206
+
+lambda.noborrow <- summary_stats.noborrow[startsWith(rownames(summary_stats.noborrow) ,"lambda"),"mean"]
+beta1.noborrow <- summary_stats.noborrow["beta1","mean"]
+beta2.noborrow <- summary_stats.noborrow["beta2","mean"]
+log_lik.noborrow <- summary_stats.noborrow[startsWith(rownames(summary_stats.noborrow) ,"log_lik"),"mean"]
+
+temp_log_lik.noborrow <- rep(NA, nrow(cur_long))
+for (i in 1:nrow(cur_long)){
+    temp_log_lik.noborrow[i] <- dpois(cur_long$status[i],  exp(log(lambda.noborrow[cur_long$interval_idx[i]]) +log(cur_long$interval_length[i])+cur_long$treat1[i]*beta1.noborrow+cur_long$treat2[i]*beta2.noborrow), log=T)
+}
+pDIC.noborrow<- 2*(sum(temp_log_lik.noborrow) -sum(log_lik.noborrow))
+dic.noborrow <- -2*sum(temp_log_lik.noborrow) + 2*pDIC.noborrow
+dic.noborrow
+# [1] 2292.44
+
+
+n.ctl <- nrow(cur[cur$treat==0,])
+var_target1 <- summary_stats.noborrow["beta1","sd"]^2
+var_target2 <- summary_stats.noborrow["beta2","sd"]^2
+ess.no.borrow1 <- n.ctl*(var_target1 / var_target1 -1) # ESS=0
+ess.no.borrow1
+
+ess.no.borrow2 <- n.ctl*(var_target2 / var_target2 -1) # ESS=0
+ess.no.borrow2
+
+```
+
+#### NPP No Bound
+
+```{r}
+#------------------------------------------------------------------------------------------------------------#
+  # NPP unbounded
+  data_npp <- list(
+    n_ti =  nrow(cur_long),
+    num_intervals = length(intervals)+1 ,
+    interval_idx = cur_long$interval_idx,
+    interval_length = cur_long$interval_length,
+    status = cur_long$status,
+    treat1 = cur_long$treat1, 
+    treat2 = cur_long$treat2,
+    D1 = ref_long_sum$Dsum[1],
+    D2 = ref_long_sum$Dsum[2],
+    D3 = ref_long_sum$Dsum[3],
+    T1 = ref_long_sum$Tsum[1],
+    T2 = ref_long_sum$Tsum[2],
+    T3 = ref_long_sum$Tsum[3]
+
+  )
+
+fit.npp.unb <- stan(
+    model_code = stan.npp.unb,
+    data = data_npp,
+    iter = 10000,  # Increase iterations for better convergence
+    warmup = 1000,
+    chains = 2,
+    seed = 123,
+    control = list(adapt_delta = 0.95, max_treedepth = 15),  # Default is 0.8, increase to 0.95 or even 0.99
+    init = "random" 
+  )
+  
+# save(fit.npp.unb,file="example_fit_npp.unb.RData")
+load("example_fit_npp.unb.RData")
+
+summary_stats.npp.unb <- summary(fit.npp.unb)$summary
+summary_stats.npp.unb[1:6,] 
+#                   mean      se_mean           sd         2.5%          25%          50%          75%        97.5%     n_eff     Rhat
+# lambda[1]  0.002650741 2.646273e-06 0.0002508534  0.002174617  0.002480089  0.002647243  0.002815894  0.003158383  8986.085 1.000095
+# lambda[2]  0.001913709 2.216042e-06 0.0002171727  0.001508872  0.001763070  0.001908972  0.002057266  0.002355562  9604.049 1.000189
+# lambda[3]  0.001350680 1.736045e-06 0.0001876492  0.001014521  0.001219809  0.001339382  0.001468456  0.001753262 11683.463 1.000096
+# beta1     -0.518507823 1.359217e-03 0.1365334374 -0.788780711 -0.609160249 -0.517061293 -0.425234300 -0.255642378 10090.213 1.000016
+# beta2     -0.346174974 1.360368e-03 0.1313704622 -0.606840872 -0.435040588 -0.345178984 -0.256731971 -0.090305746  9325.730 1.000115
+# alpha      0.437580639 2.414552e-03 0.2428359147  0.075549133  0.239905702  0.398613691  0.611257374  0.942901254 10114.689 1.000223
+
+lambda.npp.unb <- summary_stats.npp.unb[startsWith(rownames(summary_stats.npp.unb) ,"lambda"),"mean"]
+beta1.npp.unb <- summary_stats.npp.unb["beta1","mean"]
+beta2.npp.unb <- summary_stats.npp.unb["beta2","mean"]
+log_lik.npp.unb <- summary_stats.npp.unb[startsWith(rownames(summary_stats.npp.unb) ,"log_lik"),"mean"]
+
+temp_log_lik.npp.unb <- rep(NA, nrow(cur_long))
+for (i in 1:nrow(cur_long)){
+    temp_log_lik.npp.unb[i] <- dpois(cur_long$status[i],  exp(log(lambda.npp.unb[cur_long$interval_idx[i]]) +log(cur_long$interval_length[i])+cur_long$treat1[i]*beta1.npp.unb+cur_long$treat2[i]*beta2.npp.unb), log=T)
+}
+pDIC.npp.unb<- 2*(sum(temp_log_lik.npp.unb) -sum(log_lik.npp.unb))
+dic.npp.unb <- -2*sum(temp_log_lik.npp.unb) + 2*pDIC.npp.unb
+dic.npp.unb
+# [1] 2292.293
+
+var_target1.npp.unb <- summary_stats.npp.unb["beta1","sd"]^2
+var_target2.npp.unb <- summary_stats.npp.unb["beta2","sd"]^2
+n.ctl <- nrow(cur[cur$treatment=="Placebo",])
+
+ess.borrow_unb1 <- n.ctl*(var_target1 / var_target1.npp.unb  -1  )
+ess.borrow_unb1
+# [1] 31.77757
+ess.borrow_unb2 <- n.ctl*(var_target2 / var_target2.npp.unb  -1  )
+ess.borrow_unb2
+# [1] 31.26807
+
+```
+
+#### NPP Bounded
+
+```{r}
+set.seed(1234)
+ fit.npp.bb <- stan(
+    model_code = stan.npp.bb,
+    data = data_npp,
+    iter = 10000,  # Increase iterations for better convergence
+    warmup = 1000,
+    chains = 2,
+    seed = 123,
+    control = list(adapt_delta = 0.95, max_treedepth = 15),  # Default is 0.8, increase to 0.95 or even 0.99
+    init = "random"   
+  )
+
+# save(fit.npp.bb,file="example_fit_npp.bb.RData")
+load("example_fit_npp.bb.RData")
+
+summary_stats.npp.bb <- summary(fit.npp.bb)$summary
+summary_stats.npp.bb[1:6,] 
+#                   mean      se_mean           sd         2.5%          25%          50%          75%        97.5%     n_eff      Rhat
+# lambda[1]  0.002639313 2.804632e-06 0.0002560929  0.002159574  0.002463988  0.002632741  0.002809407  0.003151286  8337.643 1.0003370
+# lambda[2]  0.001900847 2.162200e-06 0.0002166811  0.001491034  0.001753750  0.001896436  0.002041069  0.002345404 10042.692 1.0000142
+# lambda[3]  0.001359028 1.670225e-06 0.0001881879  0.001020579  0.001227167  0.001348192  0.001479257  0.001754654 12695.024 0.9999738
+# beta1     -0.515372183 1.434976e-03 0.1373778788 -0.784134522 -0.607038376 -0.513789643 -0.422629672 -0.249406105  9165.253 1.0000498
+# beta2     -0.342450977 1.375262e-03 0.1326473623 -0.603872792 -0.431771099 -0.342174405 -0.252211931 -0.081998190  9303.078 0.9999284
+# alpha      0.386700020 1.601220e-03 0.1933526207  0.081544515  0.227025718  0.365809991  0.534823831  0.764690453 14581.363 0.9999949
+
+lambda.npp.bb <- summary_stats.npp.bb[startsWith(rownames(summary_stats.npp.bb) ,"lambda"),"mean"]
+beta1.npp.bb <- summary_stats.npp.bb["beta1","mean"]
+beta2.npp.bb <- summary_stats.npp.bb["beta2","mean"]
+log_lik.npp.bb <- summary_stats.npp.bb[startsWith(rownames(summary_stats.npp.bb) ,"log_lik"),"mean"]
+
+temp_log_lik.npp.bb <- rep(NA, nrow(cur_long))
+for (i in 1:nrow(cur_long)){
+    temp_log_lik.npp.bb[i] <- dpois(cur_long$status[i],  exp(log(lambda.npp.bb[cur_long$interval_idx[i]]) +log(cur_long$interval_length[i])+cur_long$treat1[i]*beta1.npp.bb+cur_long$treat2[i]*beta2.npp.bb), log=T)
+}
+pDIC.npp.bb<- 2*(sum(temp_log_lik.npp.bb) -sum(log_lik.npp.bb))
+dic.npp.bb <- -2*sum(temp_log_lik.npp.bb) + 2*pDIC.npp.bb
+dic.npp.bb
+# [1] 2292.16
+
+var_target1.npp.bb <- summary_stats.npp.bb["beta1","sd"]^2
+var_target2.npp.bb <- summary_stats.npp.bb["beta2","sd"]^2
+n.ctl <- nrow(cur[cur$treatment=="Placebo",])
+ 
+ess.borrow_bb1 <- n.ctl*(var_target1 / var_target1.npp.bb  -1  )
+ess.borrow_bb1
+# [1] 28.34864
+ess.borrow_bb2 <- n.ctl*(var_target2 / var_target2.npp.bb  -1  )
+ess.borrow_bb2
+# [1] 25.91732
+```
+
+
+#### NPP Bounded Weight
+
+```{r}
+# NPP bounded weight
+ref_cur_data <- rbind.data.frame(ref, cur%>%filter(treatment=="Placebo")) %>% mutate(ref_study=(study!="CALIMA"))
+
+fit.coxph <- coxph(Surv(time, status) ~ ref_study, data=ref_cur_data)
+# Call:
+# coxph(formula = Surv(time, status) ~ ref_study, data = ref_cur_data)
+# 
+#                 coef exp(coef) se(coef)     z     p
+# ref_studyTRUE 0.1306    1.1395   0.1259 1.038 0.299
+# 
+# Likelihood ratio test=1.08  on 1 df, p=0.2989
+# n= 515, number of events= 254 
+  
+  # Extract coefficient (log HR) and variance
+  mean_r <- coef(fit.coxph)  # Log hazard ratio
+  var_log_hr <- vcov(fit.coxph)  # Variance of log HR
+  var.tuning <- 2.4
+  prec_r <- (1/var_log_hr)/var.tuning
+  
+  data_npp.bw <- list(
+    n_ti =  nrow(cur_long),
+    num_intervals = length(intervals)+1 ,
+    interval_idx = cur_long$interval_idx,
+    interval_length = cur_long$interval_length,
+    status = cur_long$status,
+    treat1 = cur_long$treat1, 
+    treat2 = cur_long$treat2,
+    D1 = ref_long_sum$Dsum[1],
+    D2 = ref_long_sum$Dsum[2],
+    D3 = ref_long_sum$Dsum[3],
+    T1 = ref_long_sum$Tsum[1],
+    T2 = ref_long_sum$Tsum[2],
+    T3 = ref_long_sum$Tsum[3],
+    mean_r = as.numeric(mean_r),       # Example mean
+    prec_r = as.numeric(prec_r),       # Example precision
+    a = 0.05,
+    b = 0.8,
+    c_low = 0,
+    c_up = 0.3
+  )
+  
+  
+  fit.npp.bw <- stan(
+    model_code = stan.npp.bw,
+    data = data_npp.bw,
+    iter = 10000,  # Increase iterations for better convergence
+    warmup = 1000,
+    chains = 2,
+    seed = 123,
+    control = list(adapt_delta = 0.95, max_treedepth = 15),  # Default is 0.8, increase to 0.95 or even 0.99
+    # verbose = TRUE      # Show detailed error messages
+    init = "random" 
+      
+)
+ 
+  
+# save(fit.npp.bw,file="example_fit_npp.bw.RData")
+load("example_fit_npp.bw.RData")
+
+summary_stats.npp.bw <- summary(fit.npp.bw)$summary
+summary_stats.npp.bw[1:7,] 
+#                  mean      se_mean           sd         2.5%          25%          50%          75%        97.5%     n_eff      Rhat
+# lambda[1]  0.002644998 3.032806e-06 0.0002564795  0.002150602  0.002469861  0.002643040  0.002815280  0.003156620  7151.811 1.0001461
+# lambda[2]  0.001907702 2.444921e-06 0.0002193247  0.001496255  0.001758333  0.001903483  0.002051157  0.002351060  8047.214 0.9999493
+# lambda[3]  0.001360212 1.925001e-06 0.0001920232  0.001014679  0.001226129  0.001349280  0.001484899  0.001763604  9950.520 1.0000961
+# beta1     -0.518078746 1.531916e-03 0.1356722288 -0.784844027 -0.608238351 -0.517285901 -0.427559891 -0.251246178  7843.536 1.0001617
+# beta2     -0.346146784 1.545798e-03 0.1313908730 -0.603064378 -0.434758878 -0.346505841 -0.258691725 -0.088626983  7224.781 1.0000692
+# r          0.109769054 2.363522e-03 0.1760902086 -0.235639972 -0.006443627  0.140589258  0.219013198  0.455292934  5550.742 0.9998960
+# alpha      0.410287919 2.419823e-03 0.2517932747  0.050000000  0.182135875  0.401165598  0.642985195  0.797832840 10827.323 0.9999025
+
+lambda.npp.bw <- summary_stats.npp.bw[startsWith(rownames(summary_stats.npp.bw) ,"lambda"),"mean"]
+beta1.npp.bw <- summary_stats.npp.bw["beta1","mean"]
+beta2.npp.bw <- summary_stats.npp.bw["beta2","mean"]
+log_lik.npp.bw <- summary_stats.npp.bw[startsWith(rownames(summary_stats.npp.bw) ,"log_lik"),"mean"]
+
+temp_log_lik.npp.bw <- rep(NA, nrow(cur_long))
+for (i in 1:nrow(cur_long)){
+    temp_log_lik.npp.bw[i] <- dpois(cur_long$status[i],  exp(log(lambda.npp.bw[cur_long$interval_idx[i]]) +log(cur_long$interval_length[i])+cur_long$treat1[i]*beta1.npp.bw+cur_long$treat2[i]*beta2.npp.bw), log=T)
+}
+pDIC.npp.bw<- 2*(sum(temp_log_lik.npp.bw) -sum(log_lik.npp.bw))
+dic.npp.bw <- -2*sum(temp_log_lik.npp.bw) + 2*pDIC.npp.bw
+dic.npp.bw
+# [1] 2292.309
+
+var_target1.npp.bw <- summary_stats.npp.bw["beta1","sd"]^2
+var_target2.npp.bw <- summary_stats.npp.bw["beta2","sd"]^2
+n.ctl <- nrow(cur[cur$treatment=="Placebo",])
+ 
+ess.borrow_bb1 <- n.ctl*(var_target1 / var_target1.npp.bw  -1  )
+ess.borrow_bb1
+# [1] 35.34074
+ess.borrow_bb2 <- n.ctl*(var_target2 / var_target2.npp.bw  -1  )
+ess.borrow_bb2
+# [1] 31.18131
+
+```
+
+#### CPP unbounded 
+```{r}
+fit.cpp.unb <- stan(
+    model_code = stan.cpp.unb,
+    data = data_npp,
+    iter = 10000,
+    warmup = 1000,
+    chains = 2,
+    seed = 123,
+    control = list(adapt_delta = 0.9, max_treedepth = 12),
+    init = "random"   
+  )
+
+
+# save(fit.cpp.unb,file="example_fit_cpp.unb.RData")
+# load("example_fit_cpp.unb.RData")
+
+log_lambda <- extract(fit.cpp.unb, pars = "log_lambda")
+summary(as.data.frame(exp(log_lambda$log_lambda)))
+ #  V1                 V2                 V3           
+ # Min.   :0.001606   Min.   :0.001094   Min.   :0.0007589  
+ # 1st Qu.:0.002374   1st Qu.:0.001689   1st Qu.:0.0012360  
+ # Median :0.002550   Median :0.001843   Median :0.0013619  
+ # Mean   :0.002557   Mean   :0.001849   Mean   :0.0013751  
+ # 3rd Qu.:0.002731   3rd Qu.:0.002001   3rd Qu.:0.0015003  
+ # Max.   :0.003746   Max.   :0.002809   Max.   :0.0023465   
+apply(exp(log_lambda$log_lambda),2,function(x)quantile(x,probs=c(0.025,0.975)))
+  #  [,1]        [,2]        [,3]
+  #   2.5%  0.002054390 0.001425429 0.001021288
+  # 97.5% 0.003102078 0.002318042 0.001802871
+
+summary_stats.cpp.unb <- summary(fit.cpp.unb)$summary
+summary_stats.cpp.unb[1:10,] 
+#                           mean      se_mean           sd          2.5%           25%          50%          75%        97.5%     n_eff      Rhat
+# log_lambda_raw[1] -0.401754629 7.126378e-03 0.6376422781 -1.7450631759 -0.7454670431 -0.369902036 -0.071951319  0.957249918  8006.016 1.0005538
+# log_lambda_raw[2] -0.361049500 7.274763e-03 0.6919341316 -1.7865701603 -0.7525314000 -0.346340289  0.003674933  1.122924997  9046.734 1.0002016
+# log_lambda_raw[3]  0.603469702 8.302834e-03 0.7908057488 -1.0699196975  0.1458843780  0.593242903  1.094674882  2.171623510  9071.662 1.0001086
+# lambda_ref[1]      0.003002561 6.750285e-06 0.0005123435  0.0020931261  0.0026708066  0.002959063  0.003295942  0.004105133  5760.739 1.0004406
+# lambda_ref[2]      0.002171031 7.833078e-06 0.0004828047  0.0013683051  0.0018660966  0.002118909  0.002426314  0.003224760  3799.078 1.0006003
+# lambda_ref[3]      0.001088685 4.841769e-06 0.0003404157  0.0004854716  0.0008535825  0.001079224  0.001298258  0.001778643  4943.232 0.9999082
+# alpha              0.523613446 3.072204e-03 0.2651916499  0.0780335369  0.3021736352  0.513704402  0.746806237  0.975430642  7451.087 1.0000076
+# tau_log_lambda     0.457423470 7.953618e-03 0.4316738361  0.0184542389  0.1767654665  0.342248318  0.592406581  1.673963302  2945.656 1.0002744
+# beta1             -0.494647423 1.261339e-03 0.1431924627 -0.7803221893 -0.5906542579 -0.493675646 -0.397268901 -0.215310363 12887.741 0.9999783
+# beta2             -0.321914411 1.151841e-03 0.1350231670 -0.5853947772 -0.4124734057 -0.321970174 -0.229798989 -0.060400754 13741.406 1.0000525
+
+
+lambda.cpp.unb <- apply(exp(log_lambda$log_lambda),2,mean)
+beta1.cpp.unb <- summary_stats.cpp.unb["beta1","mean"]
+beta2.cpp.unb <- summary_stats.cpp.unb["beta2","mean"]
+log_lik.cpp.unb <- summary_stats.cpp.unb[startsWith(rownames(summary_stats.cpp.unb) ,"log_lik"),"mean"]
+
+temp_log_lik.cpp.unb <- rep(NA, nrow(cur_long))
+for (i in 1:nrow(cur_long)){
+    temp_log_lik.cpp.unb[i] <- dpois(cur_long$status[i],  exp(log(lambda.cpp.unb[cur_long$interval_idx[i]]) +log(cur_long$interval_length[i])+cur_long$treat1[i]*beta1.cpp.unb+cur_long$treat2[i]*beta2.cpp.unb), log=T)
+}
+pDIC.cpp.unb<- 2*(sum(temp_log_lik.cpp.unb) -sum(log_lik.cpp.unb))
+dic.cpp.unb <- -2*sum(temp_log_lik.cpp.unb) + 2*pDIC.cpp.unb
+dic.cpp.unb
+# [1] 2292.455
+
+var_target1.cpp.unb <- summary_stats.cpp.unb["beta1","sd"]^2
+var_target2.cpp.unb <- summary_stats.cpp.unb["beta2","sd"]^2
+n.ctl <- nrow(cur[cur$treatment=="Placebo",])
+
+ess_cpp.unb1 <- n.ctl*(var_target1 / var_target1.cpp.unb  -1  )
+ess_cpp.unb1
+# [1] 6.361061
+ess_cpp.unb2 <- n.ctl*(var_target2 / var_target2.cpp.unb  -1  )
+ess_cpp.unb2
+# [1] 16.36269
+```
+#### CPP bounded
+
+```{r}
+ fit.cpp.bb <- stan(
+    model_code = stan.cpp.bb,
+    data = data_npp,
+    iter = 10000,  # Increase iterations for better convergence
+    warmup = 1000,
+    chains = 2,
+    seed = 123,
+    control = list(adapt_delta = 0.9, max_treedepth = 12),  # Default is 0.8, increase to 0.95 or even 0.99
+    init = "random"     
+  )
+# save(fit.cpp.bb,file="example_fit_cpp.bb.RData")
+load("example_fit_cpp.bb.RData")
+
+log_lambda_bb <- extract(fit.cpp.bb, pars = "log_lambda")
+summary(as.data.frame(exp(log_lambda_bb$log_lambda)))
+ #       V1                 V2                 V3           
+ # Min.   :0.001658   Min.   :0.001037   Min.   :0.0007006  
+ # 1st Qu.:0.002362   1st Qu.:0.001686   1st Qu.:0.0012390  
+ # Median :0.002536   Median :0.001830   Median :0.0013645  
+ # Mean   :0.002543   Mean   :0.001839   Mean   :0.0013756  
+ # 3rd Qu.:0.002718   3rd Qu.:0.001981   3rd Qu.:0.0014999  
+ # Max.   :0.003821   Max.   :0.003076   Max.   :0.0024456     
+apply(exp(log_lambda_bb$log_lambda),2,function(x)quantile(x,probs=c(0.025,0.975)))
+  #              [,1]        [,2]        [,3]
+  # 2.5%  0.002048255 0.001427167 0.001018116
+  # 97.5% 0.003088186 0.002301286 0.001791420
+
+summary_stats.cpp.bb <- summary(fit.cpp.bb)$summary
+summary_stats.cpp.bb[1:10,] 
+#                           mean      se_mean           sd          2.5%           25%          50%          75%        97.5%     n_eff      Rhat
+# log_lambda_raw[1] -0.389485925 6.794911e-03 0.6437479495 -1.7287049623 -0.7476207252 -0.358472974 -0.057472587  0.979552907  8975.614 0.9999699
+# log_lambda_raw[2] -0.342939287 6.815569e-03 0.6957967192 -1.7620997030 -0.7430269375 -0.327503856  0.023960984  1.151424555 10422.228 1.0002110
+# log_lambda_raw[3]  0.549749340 7.763409e-03 0.8078276711 -1.1620250095  0.0853362790  0.555228731  1.053706324  2.119756900 10827.607 1.0001852
+# lambda_ref[1]      0.002978429 5.857479e-06 0.0005318253  0.0020586352  0.0026208513  0.002927278  0.003283395  0.004133535  8243.593 0.9998908
+# lambda_ref[2]      0.002148907 4.952912e-06 0.0004806272  0.0013583704  0.0018317763  0.002093348  0.002405864  0.003242450  9416.628 1.0000180
+# lambda_ref[3]      0.001106248 4.226214e-06 0.0003474142  0.0004898477  0.0008636965  0.001096758  0.001323932  0.001800045  6757.595 1.0001034
+# alpha              0.438010749 2.082414e-03 0.2065292241  0.0858691009  0.2630698657  0.435076001  0.615783087  0.781531246  9836.235 1.0000267
+# tau_log_lambda     0.459006708 6.092436e-03 0.4303590825  0.0171566331  0.1749559706  0.344475296  0.604970884  1.631744143  4989.764 1.0002917
+# beta1             -0.488989253 1.164751e-03 0.1403700425 -0.7614583495 -0.5831371002 -0.489000894 -0.393873533 -0.213335942 14523.873 1.0000827
+# beta2             -0.316276319 1.163074e-03 0.1369149097 -0.5879336491 -0.4079514820 -0.315555313 -0.224948802 -0.050667449 13857.571 1.0001373
+
+lambda.cpp.bb <- apply(exp(log_lambda_bb$log_lambda),2,mean)
+beta1.cpp.bb <- summary_stats.cpp.bb["beta1","mean"]
+beta2.cpp.bb <- summary_stats.cpp.bb["beta2","mean"]
+log_lik.cpp.bb <- summary_stats.cpp.bb[startsWith(rownames(summary_stats.cpp.bb) ,"log_lik"),"mean"]
+
+temp_log_lik.cpp.bb <- rep(NA, nrow(cur_long))
+for (i in 1:nrow(cur_long)){
+    temp_log_lik.cpp.bb[i] <- dpois(cur_long$status[i],  exp(log(lambda.cpp.bb[cur_long$interval_idx[i]]) +log(cur_long$interval_length[i])+cur_long$treat1[i]*beta1.cpp.bb+cur_long$treat2[i]*beta2.cpp.bb), log=T)
+}
+pDIC.cpp.bb<- 2*(sum(temp_log_lik.cpp.bb) -sum(log_lik.cpp.bb))
+dic.cpp.bb <- -2*sum(temp_log_lik.cpp.bb) + 2*pDIC.cpp.bb
+dic.cpp.bb
+# [1] 2292.144
+
+var_target1.cpp.bb <- summary_stats.cpp.bb["beta1","sd"]^2
+var_target2.cpp.bb <- summary_stats.cpp.bb["beta2","sd"]^2
+n.ctl <- nrow(cur[cur$treatment=="Placebo",])
+
+ess_cpp.bb1 <- n.ctl*(var_target1 / var_target1.cpp.bb  -1  )
+ess_cpp.bb1
+# [1] 16.69277
+ess_cpp.bb2 <- n.ctl*(var_target2 / var_target2.cpp.bb  -1  )
+ess_cpp.bb2
+# [1] 9.107797
+```
+
